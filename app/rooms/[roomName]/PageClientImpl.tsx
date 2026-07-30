@@ -25,6 +25,9 @@ import {
   RoomEvent,
   TrackPublishDefaults,
   VideoCaptureOptions,
+  RemoteTrack,
+  RemoteParticipant,
+  Track,
 } from 'livekit-client';
 import { useRouter } from 'next/navigation';
 import { useSetupE2EE } from '@/lib/useSetupE2EE';
@@ -140,6 +143,111 @@ function VideoConferenceComponent(props: {
   }, [props.userChoices, props.options.hq, props.options.codec]);
 
   const room = React.useMemo(() => new Room(roomOptions), []);
+  const audioContextRef = React.useRef<AudioContext | null>(null);
+  const audioDestinationRef = React.useRef<MediaStreamAudioDestinationNode | null>(null);
+  const recorderRef = React.useRef<MediaRecorder | null>(null);
+  const recorderChunksRef = React.useRef<Blob[]>([]);
+  const audioSourcesRef = React.useRef<MediaStreamAudioSourceNode[]>([]);
+  const transcriptSavedRef = React.useRef(false);
+  const recordingStartedAtRef = React.useRef<number>(0);
+
+  const addAudioTrackToTranscript = React.useCallback((mediaStreamTrack: MediaStreamTrack) => {
+    const audioContext = audioContextRef.current;
+    const destination = audioDestinationRef.current;
+    if (!audioContext || !destination || mediaStreamTrack.readyState === 'ended') return;
+    const source = audioContext.createMediaStreamSource(new MediaStream([mediaStreamTrack]));
+    source.connect(destination);
+    audioSourcesRef.current.push(source);
+  }, []);
+
+  const startTranscriptRecording = React.useCallback(() => {
+    if (recorderRef.current || typeof MediaRecorder === 'undefined') return;
+    const audioContext = new AudioContext();
+    const destination = audioContext.createMediaStreamDestination();
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/webm';
+    const recorder = new MediaRecorder(destination.stream, { mimeType });
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) recorderChunksRef.current.push(event.data);
+    };
+    recorder.start(1_000);
+    recordingStartedAtRef.current = Date.now();
+    audioContextRef.current = audioContext;
+    audioDestinationRef.current = destination;
+    recorderRef.current = recorder;
+    room.localParticipant.audioTrackPublications.forEach((publication) => {
+      if (publication.track) addAudioTrackToTranscript(publication.track.mediaStreamTrack);
+    });
+  }, [addAudioTrackToTranscript, room]);
+
+  const saveTranscript = React.useCallback(async () => {
+    if (transcriptSavedRef.current) return;
+    transcriptSavedRef.current = true;
+    const recorder = recorderRef.current;
+    if (!recorder) return;
+    const recording = await new Promise<Blob>((resolve) => {
+      recorder.onstop = () => resolve(new Blob(recorderChunksRef.current, { type: recorder.mimeType }));
+      recorder.stop();
+    });
+    audioSourcesRef.current.forEach((source) => source.disconnect());
+    await audioContextRef.current?.close();
+    if (recording.size === 0) return;
+    const formData = new FormData();
+    formData.append('roomName', room.name);
+    formData.append('speakerName', props.userChoices.username || room.localParticipant.name || 'Participant');
+    formData.append('startedAt', String(recordingStartedAtRef.current));
+    formData.append('audio', recording, 'meeting.webm');
+    const response = await fetch('/api/transcripts', { method: 'POST', body: formData });
+    if (!response.ok) throw new Error('The meeting transcript could not be saved.');
+  }, [props.userChoices.username, room.localParticipant.name, room.name]);
+
+  React.useEffect(() => {
+    const handleConnected = () => {
+      console.info('[Transcript] LiveKit connected; starting audio recorder.');
+      startTranscriptRecording();
+    };
+    const handleLocalTrackPublished = (publication: { track?: { kind: Track.Kind; mediaStreamTrack: MediaStreamTrack } }) => {
+      if (publication.track?.kind === Track.Kind.Audio) {
+        addAudioTrackToTranscript(publication.track.mediaStreamTrack);
+      }
+    };
+    room.on(RoomEvent.Connected, handleConnected);
+    room.on(RoomEvent.LocalTrackPublished, handleLocalTrackPublished);
+    return () => {
+      room.off(RoomEvent.Connected, handleConnected);
+      room.off(RoomEvent.LocalTrackPublished, handleLocalTrackPublished);
+    };
+  }, [addAudioTrackToTranscript, room, startTranscriptRecording]);
+  
+  console.log("########################");
+  console.log("MY CODE IS RUNNING");
+  console.log(room);
+  console.log("########################");
+
+  React.useEffect(() => {
+  console.log("✅ Registering TrackSubscribed listener");
+
+  const handleTrackSubscribed = (
+    track: RemoteTrack,
+    publication: any,
+    participant: RemoteParticipant
+  ) => {
+    console.log("🔥 TrackSubscribed fired");
+    console.log("Participant:", participant.identity);
+    console.log("Track kind:", track.kind);
+
+    if (track.kind === Track.Kind.Audio) {
+      console.log("🎤 Remote audio received!");
+    }
+  };
+
+  room.on(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+
+  return () => {
+    room.off(RoomEvent.TrackSubscribed, handleTrackSubscribed);
+  };
+}, [room]);
 
   React.useEffect(() => {
     if (e2eeEnabled) {
@@ -175,37 +283,45 @@ function VideoConferenceComponent(props: {
     room.on(RoomEvent.MediaDevicesError, handleError);
 
     if (e2eeSetupComplete) {
-      room
-        .connect(
+      const connectRoom = async () => {
+        await room.connect(
           props.connectionDetails.serverUrl,
           props.connectionDetails.participantToken,
           connectOptions,
-        )
-        .catch((error) => {
+        );
+        if (props.userChoices.videoEnabled) {
+          await room.localParticipant.setCameraEnabled(true);
+        }
+        if (props.userChoices.audioEnabled) {
+          await room.localParticipant.setMicrophoneEnabled(true);
+          startTranscriptRecording();
+        }
+      };
+      connectRoom().catch((error) => {
           handleError(error);
-        });
-      if (props.userChoices.videoEnabled) {
-        room.localParticipant.setCameraEnabled(true).catch((error) => {
-          handleError(error);
-        });
-      }
-      if (props.userChoices.audioEnabled) {
-        room.localParticipant.setMicrophoneEnabled(true).catch((error) => {
-          handleError(error);
-        });
-      }
+      });
     }
     return () => {
       room.off(RoomEvent.Disconnected, handleOnLeave);
       room.off(RoomEvent.EncryptionError, handleEncryptionError);
       room.off(RoomEvent.MediaDevicesError, handleError);
     };
-  }, [e2eeSetupComplete, room, props.connectionDetails, props.userChoices]);
+  }, [
+    e2eeSetupComplete,
+    room,
+    props.connectionDetails,
+    props.userChoices,
+    startTranscriptRecording,
+  ]);
 
   const lowPowerMode = useLowCPUOptimizer(room);
 
   const router = useRouter();
-  const handleOnLeave = React.useCallback(() => router.push('/'), [router]);
+  const handleOnLeave = React.useCallback(() => {
+    saveTranscript()
+      .catch((error) => console.error('Failed to save meeting transcript:', error))
+      .finally(() => router.push('/'));
+  }, [router, saveTranscript]);
   const handleError = React.useCallback((error: Error) => {
     console.error(error);
     alert(`Encountered an unexpected error, check the console logs for details: ${error.message}`);
