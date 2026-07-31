@@ -25,6 +25,7 @@ export async function GET(req: NextRequest) {
     const activeEgresses = (await egressClient.listEgress({ roomName })).filter(
       (info) => info.status < 2,
     );
+    console.log(activeEgresses);
     if (activeEgresses.length === 0) {
       return new NextResponse('No active recording found', { status: 404 });
     }

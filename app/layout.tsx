@@ -1,5 +1,7 @@
+// @ts-ignore: Allow side-effect CSS import without type declarations
 import '../styles/globals.css';
 import '@livekit/components-styles';
+// @ts-ignore: Allow side-effect CSS import without type declarations
 import '@livekit/components-styles/prefabs';
 import type { Metadata, Viewport } from 'next';
 import { Toaster } from 'react-hot-toast';
