@@ -44,3 +44,5 @@ yarn-error.log*
 *.tsbuildinfo
 
 /transcripts
+/feedback-reports
+/.feedback-data

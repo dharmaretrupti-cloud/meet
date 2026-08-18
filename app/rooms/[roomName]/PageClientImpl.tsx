@@ -320,8 +320,8 @@ function VideoConferenceComponent(props: {
   const handleOnLeave = React.useCallback(() => {
     saveTranscript()
       .catch((error) => console.error('Failed to save meeting transcript:', error))
-      .finally(() => router.push('/'));
-  }, [router, saveTranscript]);
+      .finally(() => router.push(`/rooms/${encodeURIComponent(room.name)}/feedback`));
+  }, [room.name, router, saveTranscript]);
   const handleError = React.useCallback((error: Error) => {
     console.error(error);
     alert(`Encountered an unexpected error, check the console logs for details: ${error.message}`);
